@@ -262,6 +262,281 @@ scp -i ~/.ssh/data-processing-keypair.pem ec2-user@ec2-3-81-122-235.compute-1.am
 <strong>3. Data Storage & Transformation</strong>
 
 <li>Set up an RDS instance with PostgreSQL</li>
+
+- Go to AWS Console → RDS
+- Click "Create database"
+- Choose "Standard create"
+- Select "PostgreSQL"
+- For "Templates" choose "Free tier"
+- Under "Settings":
+  - DB instance identifier: transaction-monitoring-db
+  - Master username: postgres
+  - Master password: [create a secure password]
+- Under "Instance configuration":
+  - Select db.t3.micro (free tier eligible)
+- Under "Storage":
+  - Keep defaults for free tier (20 GB)
+- Under "Connectivity":
+  - VPC: Default VPC
+  - Create new security group
+  - Public access: Yes (for development)
+- Click "Create database"
+
+First, copy the SQL files to your EC2 instance:
+
+```sh
+scp -i ~/.ssh/data-processing-keypair.pem ./sql/* ec2-user@ec2-3-81-122-235.compute-1.amazonaws.com:/home/ec2-user/sql/
+```
+
+Connect to EC2:
+
+```sh
+ssh -i ~/.ssh/data-processing-keypair.pem ec2-user@ec2-3-81-122-235.compute-1.amazonaws.com
+```
+
+To install PostgreSQL client on your EC2 instance:
+
+```sh
+sudo yum install -y postgresql15
+```
+
+On EC2, execute the SQL files against RDS:
+
+```sh
+psql -h your-rds-endpoint.region.rds.amazonaws.com -U postgres -d postgres -f ~/sql/01_create_tables.sql
+psql -h your-rds-endpoint.region.rds.amazonaws.com -U postgres -d postgres -f ~/sql/02_create_indexes.sql
+```
+
+To view your database tables and data, you can:
+
+A) Direct PostgreSQL Connection via Command Line from your EC2 instance:
+
+```sh
+psql -h your-rds-endpoint.region.rds.amazonaws.com -U postgres -d postgres
+psql -h transaction-monitoring-db.c98ei0y8k77n.us-east-1.rds.amazonaws.com -U postgres -d postgres
+```
+
+Once connected, you can:
+
+- \dt # List all tables
+- SELECT * FROM customers; # View data in a table
+- \d customers # Describe table structure
+
+B) Use a Database GUI Tool (recommended for easier visualization):
+
+- pgAdmin (most popular for PostgreSQL)
+- DBeaver (supports multiple databases)
+- DataGrip by JetBrains
+
+In my case I used pgAdmin. Once pgAdmin4 is installed:
+
+- open it and right click on "servers" in the left panel.
+- Select "Register" → "Server"
+- In the "General" tab. Name: transaction-monitoring-db (or any name you prefer)
+
+In the "Connection" tab, enter:
+
+- Host name/address:
+  transaction-monitoring-db.c98ei0y8k77n.us-east-1.rds.amazonaws.com (your RDS
+  endpoint)
+- Port: 5432
+- Maintenance database: postgres
+- Username: postgres
+- Password: (the password you set when creating the RDS instance)
+
 <li>Create tables for storing transaction data</li>
+
+- Click the "query" button in the Object Explorer toolbar
+
+- Copy and paste this SQL to insert sample data:
+
+```sql
+-- Insert customers again
+INSERT INTO customers (name, email) VALUES
+('John Smith', 'john.smith@email.com'),
+('Sarah Johnson', 'sarah.j@email.com'),
+('Michael Brown', 'mbrown@email.com'),
+('Lisa Davis', 'lisa.davis@email.com'),
+('James Wilson', 'jwilson@email.com');
+
+INSERT INTO transactions (customer_id, amount, transaction_type, transaction_date, status, ip_address, device_id) VALUES
+(1, 1500.00, 'PURCHASE', CURRENT_TIMESTAMP - INTERVAL '1 day', 'COMPLETED', '192.168.1.1', 'device_123'),
+(2, 750.50, 'TRANSFER', CURRENT_TIMESTAMP - INTERVAL '2 days', 'COMPLETED', '192.168.1.2', 'device_456'),
+(3, 2000.00, 'WITHDRAWAL', CURRENT_TIMESTAMP - INTERVAL '3 days', 'COMPLETED', '192.168.1.3', 'device_789'),
+(1, 500.00, 'DEPOSIT', CURRENT_TIMESTAMP - INTERVAL '4 days', 'COMPLETED', '192.168.1.1', 'device_123'),
+(4, 3000.00, 'PURCHASE', CURRENT_TIMESTAMP - INTERVAL '5 days', 'COMPLETED', '192.168.1.4', 'device_101');
+
+INSERT INTO transaction_details (transaction_id, merchant_name, merchant_category, location) VALUES
+(1, 'Amazon', 'Online Retail', 'Online'),
+(2, 'Bank Transfer', 'Financial', 'ATM-NYC-001'),
+(3, 'Chase ATM', 'Financial', 'ATM-LA-002'),
+(4, 'Bank Deposit', 'Financial', 'BRANCH-NY-001'),
+(5, 'Best Buy', 'Electronics', 'Store-SF-003');
+```
+
+Any time you need to verify the data was input correctly:
+
+```sql
+SELECT * FROM customers;
+```
+
+Or more specifically with commands like:
+
+```sql
+SELECT * FROM customers ORDER BY customer_id;
+SELECT * FROM transactions ORDER BY transaction_id;
+SELECT * FROM transaction_details ORDER BY detail_id;
+```
+
+Ensure you use the correct table name above.
+
 <li>Write SQL queries for data insertion and validation</li>
+
+Next we'll try some more complex queries:
+
+- Show all transactions with customer names and merchant details:
+
+```sql
+SELECT 
+    c.name as customer_name,
+    t.amount,
+    t.transaction_type,
+    td.merchant_name,
+    td.location
+FROM transactions t
+JOIN customers c ON t.customer_id = c.customer_id
+JOIN transaction_details td ON t.transaction_id = td.transaction_id
+ORDER BY t.transaction_date DESC;
+```
+
+- Find total transaction amount by merchant category:
+
+```sql
+SELECT 
+    td.merchant_category,
+    COUNT(*) as transaction_count,
+    SUM(t.amount) as total_amount
+FROM transactions t
+JOIN transaction_details td ON t.transaction_id = td.transaction_id
+GROUP BY td.merchant_category;
+```
+
+- Find customers with multiple queries:
+
+```sql
+SELECT 
+    c.name,
+    COUNT(*) as transaction_count,
+    SUM(t.amount) as total_spent
+FROM customers c
+JOIN transactions t ON c.customer_id = t.customer_id
+GROUP BY c.customer_id, c.name
+HAVING COUNT(*) > 1;
+```
+
 <li>Implement basic fraud detection queries</li>
+
+- Multiple transactions from the same customer using the same device ID within a
+  short time period:
+
+```sql
+SELECT 
+    c.name,
+    t.transaction_date,
+    t.amount,
+    t.device_id,
+    t.transaction_type,
+    td.merchant_name
+FROM transactions t
+JOIN customers c ON t.customer_id = c.customer_id
+JOIN transaction_details td ON t.transaction_id = td.transaction_id
+WHERE t.customer_id IN (
+    SELECT customer_id
+    FROM transactions
+    GROUP BY customer_id, device_id, DATE(transaction_date)
+    HAVING COUNT(*) > 1
+)
+ORDER BY t.customer_id, t.transaction_date;
+```
+
+- Transactions above average amount (potential unusual spending):
+
+```sql
+WITH avg_amount AS (
+    SELECT AVG(amount) as mean_amount, STDDEV(amount) as std_amount
+    FROM transactions
+)
+SELECT 
+    c.name,
+    t.amount,
+    t.transaction_type,
+    td.merchant_name,
+    td.location,
+    t.transaction_date
+FROM transactions t
+JOIN customers c ON t.customer_id = c.customer_id
+JOIN transaction_details td ON t.transaction_id = td.transaction_id
+CROSS JOIN avg_amount
+WHERE t.amount > (mean_amount + 2 * std_amount);
+```
+
+- Multiple locations in a short timeframe (impossible travel):
+
+```sql
+SELECT 
+    c.name,
+    t1.transaction_date as first_transaction_time,
+    td1.location as first_location,
+    t2.transaction_date as second_transaction_time,
+    td2.location as second_location,
+    t1.amount as first_amount,
+    t2.amount as second_amount
+FROM transactions t1
+JOIN transactions t2 ON t1.customer_id = t2.customer_id
+JOIN transaction_details td1 ON t1.transaction_id = td1.transaction_id
+JOIN transaction_details td2 ON t2.transaction_id = td2.transaction_id
+JOIN customers c ON t1.customer_id = c.customer_id
+WHERE t1.transaction_id < t2.transaction_id
+    AND td1.location != td2.location
+    AND t2.transaction_date - t1.transaction_date < INTERVAL '1 day';
+```
+
+- Frequent small transactions (potential card testing):
+
+```sql
+SELECT 
+    c.name,
+    COUNT(*) as transaction_count,
+    AVG(t.amount) as avg_amount,
+    MIN(t.transaction_date) as first_transaction,
+    MAX(t.transaction_date) as last_transaction
+FROM transactions t
+JOIN customers c ON t.customer_id = c.customer_id
+GROUP BY c.customer_id, c.name
+HAVING COUNT(*) > 2 AND AVG(t.amount) < (SELECT AVG(amount) FROM transactions);
+```
+
+<strong>4. API & Integration Layer</strong>
+
+Create a simple REST API using your preferred OOP language that:
+
+<li>Accepts JSON payloads</li>
+<li>Validates incoming data against XML schemas</li>
+<li>Transforms data between different formats</li>
+<li>Stores data in DynamoDB for rapid access</li>
+
+There are numerous options for using an API framework including vanilla Python,
+Flask, Django, Express.js (Node.js), Nest.js (Node.js), Spring Boot (Java),etc.
+
+In our case we're going to use Spring Boot and Gradle.
+
+Note that:
+
+Gradle is used to:
+
+<li>Manage dependencies</li>
+<li>Build the project</li>
+<li>Run tests</li>
+<li>Package the application</li>
+
+For API integration, we will use Gradle with Spring Boot.
